@@ -143,7 +143,21 @@ only_parquet <- bench::mark(data_parquet %>%
   sf::st_as_sf(crs = 25830)
 )
 
-benchmark_results <- bind_rows(remote_parquet_test, locally_parquet, only_parquet) %>%
+# 4) sf with parquet (reading the file locally)
+data_parquet <- open_dataset("DATA/meteo_stations_2000_2024.parquet")
+
+data_sf_parquet <- bench::mark(data_parquet %>% 
+  select(day, year, month, station_province,
+        dplyr::starts_with("Temperature"),
+        dplyr::ends_with("Humidity"),
+        Precipitation,
+        geom) %>%
+  filter(year == 2020) %>% 
+  st_as_sf(crs = 25830)
+)
+
+# Benchmark results
+benchmark_results <- bind_rows(remote_parquet_test, locally_parquet, only_parquet, data_sf_parquet) %>%
   select(min, median, `itr/sec`,`mem_alloc`, `gc/sec`, n_itr, n_gc, total_time)
 
 # Export results
@@ -152,47 +166,10 @@ openxlsx::write.xlsx(
   "D:/Escritorio/Documentos/Diplomatura Ciencia de datos geográficos/R/Módulo 4/benchmark_meteo_ourense_2020.xlsx"
 )
 
-# Benchmarking
-performance_meteo_data <- bench::mark(
-  "remotely_duckdb" = {
-    remote_db <- dbGetQuery(db_conn, parquet_prep) %>%
-      select(day,
-         year,
-         month,
-         starts_with("Temperature"),
-         ends_with("Humidity"),
-         Precipitation,
-         geom) %>%
-      st_as_sf(crs = 25830)
-  },
-  
-  "locally_duckdb" = {
-    DBI::dbGetQuery(db_conn, locally_data) %>% 
-    select(day,
-           year,
-           month,
-           starts_with("Temperature"),
-           ends_with("Humidity"),
-           Precipitation,
-           geom) %>% 
-    st_as_sf(crs = 25830)
-    },
-  
-  "parquet_local" = {
-    data_parquet <- data_parquet %>% 
-      select(day,
-             year,
-             month,
-             starts_with("Temperature"),
-             ends_with("Humidity"),
-             Precipitation,
-             geom) %>% 
-      st_as_sf(crs = 25830)
-  },
-  iterations = 5
-)
-
 ```
+
+El método que ha presentado mayor velocidad a la hora de cargar el archivo de datos temporales ha sido la combinación de arrow para abrir el archivo parquet de forma manual junto con sf. La media de tiempo reporta unos 2.25 segundos para cargar y procesar los datos.
+
 
 # Ejercicio 2.
 
