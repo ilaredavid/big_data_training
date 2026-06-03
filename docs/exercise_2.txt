@@ -1,0 +1,7 @@
+Para procesar la información meteorológica de todos los municipios de España, utilizaría una combinación de los paquetes arrow y duckdb para seleccionar y filtrar las variables que buscamos analizar. Los pasos a seguir serían los siguientes:
+
+1 - Abrir el archivo parquet mediante la libreria "arrow" con la función "open_dataset()". Esto permitiría leer los metadatos del archivo y visualizar el contenido de las columnas.
+
+2 - Cargar el archivo descargado mediante duck_db a través de las funciones "dbConnect()" y "dbGetQuery" y seleccionar columnas relacionadas con la fecha, municipio, las variables principales (humedad relativa, temperatura y precipitación) y geometría.
+
+3- Paralelizar el procesado de los datos mediante mirai y purrr::map utilizando el número óptimo de núcleos.
