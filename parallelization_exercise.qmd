@@ -396,3 +396,40 @@ time_map <- system.time({
 })
 
 ```
+
+### 3) Modify the script to perform the task in parallel. Has it any benefit of time?
+```{r}
+library(mirai)
+
+# 1. Start mirai daemons
+mirai::daemons(6)
+
+withr::defer(mirai::daemons(0))
+
+# 2. Process all days in parallel
+time_parallel <- system.time({
+  
+  meteo_municipal_parallel_list <- purrr::map(
+    file_url,
+    purrr::in_parallel(
+      \(url) {
+        process_day(
+          url = url,
+          municipality_file_sql = municipality_file_sql,
+          summary_expressions = summary_expressions
+        )
+      },
+      process_day = process_day,
+      municipality_file_sql = municipality_file_sql,
+      summary_expressions = summary_expressions
+    )
+  )
+  meteo_municipal_2020_parallel <- dplyr::bind_rows(
+    meteo_municipal_parallel_list
+  )
+})
+
+```
+
+Comparando los dos procesos, el proceso con purr::map reporta un tiempo de carga de 8.67 segundos mientras que el proceso de paralelización muestra un tiempo de carga de 8.22 segundos. Existe cierta mejora en la eficiencia al paralelizar el proceso, aunque en este caso no parece que la diferencia sea muy amplia.
+
