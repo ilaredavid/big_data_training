@@ -1146,3 +1146,43 @@ mean_bias_2007 <- official_bias_2007 %>%
   )
 print(mean_bias_2007)
 ```
+
+ * e) Which interpolation, yours or the official, has less bias?, answer with a comment at the end of the script.
+
+```{r}
+# Calculate bias for interpolated meteo data in a sample of 15 days in April 2007
+sample_dates_2007 <- sort(unique(official_predicted_data$date))
+
+meteo_bias_2007 <- purrr::map_df(
+  sample_dates_2007,
+  calculate_bias
+)
+
+# 6) Calculate mean bias for 2007
+mean_meteo_bias_2007 <- meteo_bias_2007 %>%
+  dplyr::summarise(
+    n_observations = dplyr::n(),
+    mean_observed = mean(observed, na.rm = TRUE),
+    mean_predicted = mean(predicted, na.rm = TRUE),
+    mean_bias = mean(bias, na.rm = TRUE),
+  )
+print(mean_meteo_bias_2007$mean_bias)
+
+ # Calculate bias for official interpolated meteo data in a sample of 15 days in April 2007
+official_bias_2007 <- purrr::map_df(
+  sample_dates_2007,
+  calculate_official_bias
+)
+
+# 6) Calculate mean bias for official data
+mean_official_bias_2007 <- official_bias_2007 %>%
+  dplyr::summarise(
+    n_observations = dplyr::n(),
+    mean_observed = mean(observed, na.rm = TRUE),
+    mean_official_predicted = mean(official_predicted, na.rm = TRUE),
+    mean_bias = mean(bias, na.rm = TRUE),
+  )
+print(mean_official_bias_2007$mean_bias)
+
+```
+The bias is greater in official interpolated data (0.15) than in the meteo interpolated data (0.000001). Additional metrics such as RMSE and cross-validations would be required to test the predictive accuracy.
