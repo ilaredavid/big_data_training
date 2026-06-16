@@ -956,7 +956,193 @@ mean_bias_2007 <- bias_2007 %>%
     mean_predicted = mean(predicted, na.rm = TRUE),
     mean_bias = mean(bias, na.rm = TRUE),
   )
+print(mean_bias_2007$mean_bias)
 ```
 The mean bias for the interpolated data is near 0, therefore the predicted data does not over or under estimate the interpolated data.
 
+  
+* d) Using the official interpolated meteo data https://data-emf.creaf.cat/public/parquet/daily_interpolated_meteo/ extract the data for Asturias   stations location for a sample of 15 days in 2007 and calculate the bias of the official interpolation.
 
+```{r}
+
+##########
+# Official interpolated data
+# file urls
+file_urls <- glue::glue(
+  "https://data-emf.creaf.cat/public/parquet/daily_interpolated_meteo/{20070401:20070415}.parquet"
+)
+# leon province filter
+ast_wkt <- mapSpain::esp_get_prov("Asturias") |>
+  sf::st_transform(crs = 25830) |>
+  dplyr::pull("geometry") |>
+  sf::st_as_text()
+
+# function for each file
+process_day <- function(url) {
+  # DB conn
+  duckdb_conn <- DBI::dbConnect(duckdb::duckdb())
+  DBI::dbExecute(duckdb_conn, "INSTALL spatial;")
+  DBI::dbExecute(duckdb_conn, "LOAD spatial;")
+  DBI::dbExecute(duckdb_conn, "INSTALL httpfs;")
+  DBI::dbExecute(duckdb_conn, "LOAD httpfs;")
+  withr::defer(DBI::dbDisconnect(duckdb_conn))
+  # query
+  asturias_query <- glue::glue("
+    SELECT
+      dates,
+      Precipitation,
+    ST_AsText(
+      CASE
+        WHEN ST_GeometryType(geom) IN ('POLYGON', 'MULTIPOLYGON')
+          THEN ST_Centroid(geom)
+        ELSE geom
+      END) AS geometry_wkt
+    FROM read_parquet('{url}')
+    WHERE
+      ST_Intersects(
+        geom,
+        ST_GeomFromText('{ast_wkt}')
+      )
+      AND Precipitation IS NOT NULL
+  ")
+  
+  # result
+  result <- DBI::dbGetQuery(duckdb_conn, asturias_query)
+  
+  result_sf <- result |>
+    sf::st_as_sf(wkt = "geometry_wkt", crs = 25830, remove = TRUE) |>
+    dplyr::rename(date = dates,
+                  predicted = Precipitation)
+  
+  return(result_sf)
+}
+
+# Paralellization with mirai
+mirai::daemons(6)
+# close mirai daemons when session ends
+withr::defer(mirai::daemons(0))
+
+# process all days
+official_predicted_data <- purrr::map(
+    file_urls,
+    purrr::in_parallel(
+      \(url) {process_day(url)},
+      process_day = process_day,
+      ast_wkt = ast_wkt
+    )
+  )
+
+official_predicted_data <- official_predicted_data %>% 
+  compact() %>%
+  bind_rows()
+
+### Observed data
+### 1) Open meteo dataset with the selected parameters
+data_parquet <- open_dataset("DATA/meteo_stations_2000_2024.parquet")
+
+meteo_parquet <- data_parquet %>% 
+  select(day, year, month, station_province, Precipitation, geom) %>%
+  filter(year == 2007,
+         station_province == "ASTURIAS") %>% 
+  # Extract coordinates
+  dplyr::collect() %>%
+  dplyr::mutate(
+    date = as.Date(
+      paste(day, month, year, sep = "/"),
+      format = "%d/%m/%Y"))
+
+# Create coordinates format from parquet data
+geom_sfc <- sf::st_as_sfc(structure(meteo_parquet$geom, class = "WKB"), crs = 4326)
+
+meteo_parquet <- st_sf(meteo_parquet %>%
+    dplyr::select(
+      date, station_province, Precipitation),
+  geometry = geom_sfc) %>%
+  sf::st_transform(25830)
+
+# Sort by dates
+meteo_parquet <- meteo_parquet[order(meteo_parquet$date),]
+
+
+# 3) Calculate descriptive stats before interpolation to filter the outliers
+# 3.1) Calculate IQR with positive values higher than 0 (to avoid bias in the upper limits)
+meteo_parquet_positive <- meteo_parquet %>% 
+  filter(Precipitation >= 0)
+
+q1 <- quantile(meteo_parquet_positive$Precipitation, 0.25, na.rm = TRUE)
+q3 <- quantile(meteo_parquet_positive$Precipitation, 0.75, na.rm = TRUE) 
+iqr <- q3 - q1
+
+# 3.2) Calculate lower and upper limits
+lower_limits <- q1 - 1.5 * iqr
+if (lower_limits < 0){
+  lower_limits <- 0
+}
+upper_limits <- q3 + 1.5 * iqr
+if (upper_limits < 30){
+  upper_limits <- 50
+}
+
+# 3.4) Filter all precipitation values according to the limits
+meteo_parquet_positive <- meteo_parquet_positive %>% 
+  mutate(Precipitation = ifelse(Precipitation < lower_limits | Precipitation > upper_limits, NA, Precipitation))
+
+# Set dataframes for observed and official predicted data
+meteo_observed_2007 <- meteo_parquet_positive %>%
+  filter(!is.na(Precipitation)) %>%
+  select(date, observed = Precipitation)
+
+meteo_official_predicted_2007 <- official_predicted_data %>%
+  sf::st_transform(sf::st_crs(official_predicted_data)) %>%
+  select(
+    date,
+    predicted
+  )
+
+# 4) Mean bias
+calculate_official_bias <- function(selected_date) {
+  
+  observed_day <- meteo_observed_2007 %>%
+    dplyr::filter(date == selected_date)
+  
+  predicted_day <- meteo_official_predicted_2007 %>%
+    dplyr::filter(date == selected_date)
+  
+  if (nrow(observed_day) == 0 | nrow(predicted_day) == 0) {
+    return(tibble::tibble())
+  }
+  
+  # Find nearest coordinate from observed
+  nearest_cell <- st_nearest_feature(
+    observed_day,
+    predicted_day
+  )
+  
+  bias <- tibble::tibble(
+    date = observed_day$date,
+    observed = observed_day$observed,
+    official_predicted = predicted_day$predicted[nearest_cell],
+    bias = official_predicted - observed
+  )
+  
+  return(bias)
+}
+
+# 5) Apply bias for 2007
+dates_2007 <- sort(unique(official_predicted_data$date))
+
+official_bias_2007 <- purrr::map_df(
+  dates_2007,
+  calculate_official_bias
+)
+
+# 6) Calculate mean bias for official data
+mean_bias_2007 <- official_bias_2007 %>%
+  dplyr::summarise(
+    n_observations = dplyr::n(),
+    mean_observed = mean(observed, na.rm = TRUE),
+    mean_official_predicted = mean(official_predicted, na.rm = TRUE),
+    mean_bias = mean(bias, na.rm = TRUE),
+  )
+print(mean_bias_2007)
+```
