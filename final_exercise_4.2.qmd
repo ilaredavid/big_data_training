@@ -614,7 +614,7 @@ Comparando los dos procesos, el proceso con purr::map reporta un tiempo de carga
 # Ejercicio 6: Real life problem
 As for the last exercise, it will be a real-life problem. For solving this, you should use both what you’ve learned in this module and in the previous modules of the whole course and create an script in your git project to perform the following:
 
-  *a) With the meteorological stations data (https://data-emf.creaf.cat/public/parquet/stations_data_historical/) and using what you have learned       in the previous modules, interpolate the precipitation data to continuous for Asturias province for each day of 2015.
+  *a) With the meteorological stations data (https://data-emf.creaf.cat/public/parquet/stations_data_historical/) and using what you have learned       in the previous modules, interpolate the precipitation data to continuous for Asturias province for each day of 2007.
   
   *b) For this you should know how to read and extract the data you need from the parquet file, create a grid of 500m for Asturias, and
       interpolate the precipitation data using the method you prefer.
@@ -705,7 +705,7 @@ data_parquet <- open_dataset("DATA/meteo_stations_2000_2024.parquet")
 
 meteo_parquet <- data_parquet %>% 
   select(day, year, month, station_province, Precipitation, geom) %>%
-  filter(year == 2015,
+  filter(year == 2007,
          station_province == "ASTURIAS") %>% 
   # Extract coordinates
   dplyr::collect() %>%
@@ -723,17 +723,8 @@ meteo_parquet <- st_sf(meteo_parquet %>%
   geometry = geom_sfc) %>%
   sf::st_transform(25830)
 
-
-### Create a column with dates
-meteo_parquet$date <- paste0(meteo_parquet$day,"/",meteo_parquet$month,"/",meteo_parquet$year)
-meteo_parquet$date <- as.Date(meteo_parquet$date, format = "%d/%m/%Y")
-
 # Sort by dates
 meteo_parquet <- meteo_parquet[order(meteo_parquet$date),]
-meteo_parquet <- meteo_parquet %>% 
-  select(-c(day, month, year)) %>% 
-  relocate(date, .before = station_province)
-
 
 # 2) Visualize the data to detect possible outliers
 meteo_plot <- as.data.frame(meteo_parquet)
@@ -835,18 +826,137 @@ interpolate_day_idw <- function(selected_date) {
 }
 
 # 6) Apply interpolation to 2015 daily dates
-dates_2015 <- sort(unique(meteo_parquet_positive$date))
+dates_2007 <- sort(unique(meteo_parquet_positive$date))
 
-meteo_idw_list_2015 <- purrr::map(
-  dates_2015,
+meteo_idw_list_2007 <- purrr::map(
+  dates_2007,
   interpolate_day_idw
 )
   
-meteo_idw_2015_grid <- meteo_idw_list_2015 %>%
+meteo_idw_2007_grid <- meteo_idw_list_2007 %>%
   purrr::compact() %>%
   dplyr::bind_rows()
 
 ````
 
+  
+  *c) Calculate the mean bias of the interpolation (predicted - observed) for all the period (2007)
+
+```{r}
+# Read gpkg file
+library(sf)
+library(dplyr)
+
+meteo_gpkg <- sf::st_read(
+  "outputs/precipitation_idw_asturias_2007_2.gpkg"
+)
+
+### 1) Open meteo dataset with the selected parameters
+data_parquet <- open_dataset("DATA/meteo_stations_2000_2024.parquet")
+
+meteo_parquet <- data_parquet %>% 
+  select(day, year, month, station_province, Precipitation, geom) %>%
+  filter(year == 2007,
+         station_province == "ASTURIAS") %>% 
+  # Extract coordinates
+  dplyr::collect() %>%
+  dplyr::mutate(
+    date = as.Date(
+      paste(day, month, year, sep = "/"),
+      format = "%d/%m/%Y"))
+
+# Create coordinates format from parquet data
+geom_sfc <- sf::st_as_sfc(structure(meteo_parquet$geom, class = "WKB"), crs = 4326)
+
+meteo_parquet <- st_sf(meteo_parquet %>%
+    dplyr::select(
+      date, station_province, Precipitation),
+  geometry = geom_sfc) %>%
+  sf::st_transform(25830)
+
+# Sort by dates
+meteo_parquet <- meteo_parquet[order(meteo_parquet$date),]
+
+
+# 3) Calculate descriptive stats before interpolation to filter the outliers
+# 3.1) Calculate IQR with positive values higher than 0 (to avoid bias in the upper limits)
+meteo_parquet_positive <- meteo_parquet %>% 
+  filter(Precipitation >= 0)
+
+q1 <- quantile(meteo_parquet_positive$Precipitation, 0.25, na.rm = TRUE)
+q3 <- quantile(meteo_parquet_positive$Precipitation, 0.75, na.rm = TRUE) 
+iqr <- q3 - q1
+
+# 3.2) Calculate lower and upper limits
+lower_limits <- q1 - 1.5 * iqr
+if (lower_limits < 0){
+  lower_limits <- 0
+}
+upper_limits <- q3 + 1.5 * iqr
+if (upper_limits < 30){
+  upper_limits <- 50
+}
+
+# 3.4) Filter all precipitation values according to the limits
+meteo_parquet_positive <- meteo_parquet_positive %>% 
+  mutate(Precipitation = ifelse(Precipitation < lower_limits | Precipitation > upper_limits, NA, Precipitation))
+
+meteo_observed_2007 <- meteo_parquet_positive %>%
+  filter(!is.na(Precipitation)) %>%
+  select(date,observed = Precipitation)
+
+meteo_predicted_2007 <- meteo_gpkg %>%
+  sf::st_transform(sf::st_crs(meteo_observed_2007)) %>%
+  select(
+    date,
+    predicted = precipitation_idw
+  )
+
+# 4) Mean bias
+calculate_bias <- function(selected_date) {
+  
+  observed_day <- meteo_observed_2007 %>%
+    dplyr::filter(date == selected_date)
+  
+  predicted_day <- meteo_predicted_2007 %>%
+    dplyr::filter(date == selected_date)
+  
+  if (nrow(observed_day) == 0 | nrow(predicted_day) == 0) {
+    return(tibble::tibble())
+  }
+  
+  # Find nearest coordinate from observed
+  nearest_cell <- st_nearest_feature(
+    observed_day,
+    predicted_day
+  )
+  
+  bias <- tibble::tibble(
+    date = observed_day$date,
+    observed = observed_day$observed,
+    predicted = predicted_day$predicted[nearest_cell],
+    bias = predicted - observed
+  )
+  
+  return(bias)
+}
+# 5) Apply bias for 2007
+dates_2007 <- sort(unique(meteo_observed_2007$date))
+
+bias_2007 <- purrr::map_df(
+  dates_2007,
+  calculate_bias
+)
+
+# 6) Calculate mean bias for 2007
+mean_bias_2007 <- bias_2007 %>%
+  dplyr::summarise(
+    n_observations = dplyr::n(),
+    mean_observed = mean(observed, na.rm = TRUE),
+    mean_predicted = mean(predicted, na.rm = TRUE),
+    mean_bias = mean(bias, na.rm = TRUE),
+  )
+```
+The mean bias for the interpolated data is near 0, therefore the predicted data does not over or under estimate the interpolated data.
 
 
