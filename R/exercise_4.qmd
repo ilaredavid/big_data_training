@@ -1,0 +1,99 @@
+---
+title: "exercise_4"
+format: html
+editor: visual
+---
+
+# Exercise 4
+
+Using the optimal number of cores in your case, compare (benchmark) the performance of the method you used to solve the previous exercise and the same using mirai and in_parallel instead. For this, modify the script in the previous exercise to add this comparison at the end.
+
+```{r}
+# Benchmark with mirai and do_parallel
+# libraries
+library(mirai)
+library(parallel)
+library(foreach)
+library(doParallel)
+library(dplyr)
+library(purrr)
+library(bench)
+
+# Optimal number of cores according to previous benchmark
+optimal_cores <- 8
+
+# Method 1: parallel::parLapply with optimal number of cores
+
+run_parLapply_optimal <- function() {
+  
+  cl <- parallel::makeCluster(optimal_cores)
+  on.exit(parallel::stopCluster(cl), add = TRUE)
+  
+  parallel::clusterExport(
+    cl,
+    varlist = c("iris_data", "coef_function", "n_repetitions"),
+    envir = environment()
+  )
+  
+  parallel::clusterSetRNGStream(cl, iseed = 123)
+  
+  parallel::parLapply(
+    cl,
+    X = seq_len(n_repetitions),
+    fun = coef_function
+  )
+}
+
+# Method 2: purrr::map with mirai::in_parallel
+
+run_mirai_optimal <- function() {
+  
+  mirai::daemons(optimal_cores)
+  on.exit(mirai::daemons(0), add = TRUE)
+  
+  purrr::map(
+    seq_len(n_repetitions),
+    purrr::in_parallel(
+      \(repetition) {
+        
+        sample_individuals <- sample(
+          seq_len(nrow(iris_data)),
+          nrow(iris_data),
+          replace = TRUE
+        )
+        
+        boot_data <- iris_data[sample_individuals, ]
+        
+        model_res <- suppressWarnings(
+          stats::glm(
+            Species ~ Petal.Length,
+            data = boot_data,
+            family = stats::binomial()
+          )
+        )
+        
+        stats::coefficients(model_res)
+      },
+      iris_data = iris_data
+    )
+  )
+}
+
+# Benchmark comparison
+
+parallel_comparison_benchmark <- bench::mark(
+  parLapply_optimal = run_parLapply_optimal(),
+  mirai_in_parallel = run_mirai_optimal(),
+  iterations = 3,
+  check = FALSE,
+  memory = FALSE,
+  time_unit = "s"
+)
+
+parallel_comparison_benchmark <- data.frame(parallel_comparison_benchmark)
+
+```
+
+-   Is there any differences? Answer in a comment in the script. Yes, results from the benchmark show a improvement in the total time of 5 seconds using mirai over doParallel with 8 cores.
+
+Yes, results from the benchmark show a improvement in the total time of 5 seconds using mirai over doParallel with 8 cores. Furrr and doParallel seems to be similar in time efficiency

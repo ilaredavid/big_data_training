@@ -1,0 +1,244 @@
+---
+title: "exercise_5"
+format: html
+editor: visual
+---
+
+# Ejercicio 5: Parallelization II
+
+### 1) Check the strategy you wrote. Would you change something now after knowing more about loops and parallelization?
+
+Si, en un principio había incluido los pasos de parquet y duckdb para poder leer y cargar los archivos. Ahora incluiría otro paso para paralelizar el proceso mediante mirai y purrr::map
+
+### 2) Write an script that perform the requested task, using purrr::map
+
+```{r}
+library(DBI)
+library(duckdb)
+library(dplyr)
+library(purrr)
+library(glue)
+library(sf)
+library(mapSpain)
+library(arrow)
+library(stringr)
+library(tibble)
+library(readr)
+
+# Select directory path
+current_folder<-dirname(rstudioapi::getActiveDocumentContext()$path)
+setwd(current_folder)
+
+data_folder <- file.path(current_folder, "..", "DATA")
+
+# Create folders
+dir.create("DATA", showWarnings = FALSE)
+dir.create("outputs", showWarnings = FALSE)
+
+# 1. Install DuckDB extensions
+
+duckdb_conn <- DBI::dbConnect(duckdb::duckdb())
+
+DBI::dbExecute(duckdb_conn, "INSTALL spatial;")
+DBI::dbExecute(duckdb_conn, "LOAD spatial;")
+DBI::dbExecute(duckdb_conn, "INSTALL httpfs;")
+DBI::dbExecute(duckdb_conn, "LOAD httpfs;")
+
+DBI::dbDisconnect(duckdb_conn, shutdown = TRUE)
+
+# 2. Create daily file URLs for 2020
+
+dates_2020 <- seq.Date(
+  from = as.Date("2020-01-01"),
+  to   = as.Date("2020-12-31"),
+  by   = "day"
+)
+
+date_ids <- format(dates_2020, "%Y%m%d")
+
+file_url <- glue::glue(
+  "https://data-emf.creaf.cat/public/parquet/stations_data_historical/meteo_stations_2000_2024.parquet"
+)
+
+# 3. Prepare municipality geometries
+municipalities_sf <- mapSpain::esp_get_munic() |>
+  sf::st_transform(crs = 25830)
+
+# Create municipality code
+if ("cod_muni" %in% names(municipalities_sf)) {
+  municipalities_sf$municipality_code <- municipalities_sf$cod_muni
+} else if (all(c("cpro", "cmun") %in% names(municipalities_sf))) {
+  municipalities_sf$municipality_code <- paste0(
+    municipalities_sf$cpro,
+    municipalities_sf$cmun
+  )
+} else {
+  municipalities_sf$municipality_code <- as.character(seq_len(nrow(municipalities_sf)))
+}
+
+# Create municipality name
+if ("name" %in% names(municipalities_sf)) {
+  municipalities_sf$municipality_name <- municipalities_sf$name
+} else {
+  municipalities_sf$municipality_name <- municipalities_sf$municipality_code
+}
+
+municipalities_tbl <- municipalities_sf %>% 
+  sf::st_drop_geometry() %>% 
+  dplyr::select(
+    municipality_code,
+    municipality_name
+  )
+
+municipalities_tbl$wkt <- st_as_text(st_geometry(municipalities_sf))
+
+# Save municipalities as a small local parquet file
+municipality_file <- paste0(data_folder, "/", "municipalities_spain_25830.parquet")
+
+arrow::write_parquet(
+  municipalities_tbl,
+  municipality_file
+)
+
+municipality_file_sql <- normalizePath(
+  municipality_file,
+  winslash = "/",
+  mustWork = TRUE
+)
+
+# 4. Inspect metadata
+duckdb_conn <- DBI::dbConnect(duckdb::duckdb())
+
+DBI::dbExecute(duckdb_conn, "LOAD httpfs;")
+
+schema <- DBI::dbGetQuery(
+  duckdb_conn,
+  glue::glue("
+    DESCRIBE SELECT *
+    FROM read_parquet('{file_url}')
+  ")
+)
+
+DBI::dbDisconnect(duckdb_conn, shutdown = TRUE)
+
+# 5. Define summary expressions
+all_cols <- schema$column_name
+
+summary_candidates <- tibble::tibble(
+  column = c(
+    "MinTemperature",
+    "MaxTemperature",
+    "MeanTemperature",
+    "MinRelativeHumidity",
+    "MaxRelativeHumidity",
+    "MeanRelativeHumidity",
+    "Precipitation"
+  ),
+  expression = c(
+    "MIN(m.MinTemperature) AS min_temperature",
+    "MAX(m.MaxTemperature) AS max_temperature",
+    "AVG(m.MeanTemperature) AS mean_temperature",
+    "MIN(m.MinRelativeHumidity) AS min_relative_humidity",
+    "MAX(m.MaxRelativeHumidity) AS max_relative_humidity",
+    "AVG(m.MeanRelativeHumidity) AS mean_relative_humidity",
+    "AVG(m.Precipitation) AS mean_precipitation"
+  )
+)
+
+summary_expressions <- summary_candidates %>% 
+  dplyr::filter(column %in% all_cols) %>% 
+  dplyr::pull(expression) %>% 
+  paste(collapse = ",\n      ")
+
+
+# 6. Function to process one day
+
+process_day <- function(url, municipality_file_sql, summary_expressions) {
+  
+  duckdb_conn <- DBI::dbConnect(duckdb::duckdb())
+  on.exit(DBI::dbDisconnect(duckdb_conn, shutdown = TRUE), add = TRUE)
+  
+  DBI::dbExecute(duckdb_conn, "LOAD spatial;")
+  DBI::dbExecute(duckdb_conn, "LOAD httpfs;")
+  
+  query <- glue::glue("
+    WITH municipalities AS (
+      SELECT *
+      FROM read_parquet('{municipality_file_sql}')
+    )
+    
+    SELECT
+      mu.municipality_code,
+      mu.municipality_name,
+      m.dates,
+      {summary_expressions},
+      COUNT(*) AS n_cells
+    FROM read_parquet('{url}') AS m
+    INNER JOIN municipalities AS mu
+      ON ST_Intersects(m.geom, ST_GeomFromText(mu.wkt))
+    GROUP BY
+      mu.municipality_code,
+      mu.municipality_name,
+      m.dates
+    ORDER BY
+      mu.municipality_code,
+      m.dates
+  ")
+  
+  DBI::dbGetQuery(duckdb_conn, query)
+}
+
+# 7. Process all days using purrr::map()
+
+time_map <- system.time({
+  
+  meteo_municipal_list <- purrr::map(
+    file_url,
+    process_day,
+    municipality_file_sql = municipality_file_sql,
+    summary_expressions = summary_expressions
+  )
+  
+  meteo_municipal_2020 <- dplyr::bind_rows(meteo_municipal_list)
+})
+
+```
+
+### 3) Modify the script to perform the task in parallel. Has it any benefit of time?
+
+```{r}
+library(mirai)
+
+# 1. Start mirai daemons
+mirai::daemons(6)
+
+withr::defer(mirai::daemons(0))
+
+# 2. Process all days in parallel
+time_parallel <- system.time({
+  
+  meteo_municipal_parallel_list <- purrr::map(
+    file_url,
+    purrr::in_parallel(
+      \(url) {
+        process_day(
+          url = url,
+          municipality_file_sql = municipality_file_sql,
+          summary_expressions = summary_expressions
+        )
+      },
+      process_day = process_day,
+      municipality_file_sql = municipality_file_sql,
+      summary_expressions = summary_expressions
+    )
+  )
+  meteo_municipal_2020_parallel <- dplyr::bind_rows(
+    meteo_municipal_parallel_list
+  )
+})
+
+```
+
+Comparando los dos procesos, el proceso con purr::map reporta un tiempo de carga de 8.67 segundos mientras que el proceso de paralelización muestra un tiempo de carga de 8.22 segundos. Existe cierta mejora en la eficiencia al paralelizar el proceso, aunque en este caso no parece que la diferencia sea muy amplia.
+
+------------------------------------------------------------------------

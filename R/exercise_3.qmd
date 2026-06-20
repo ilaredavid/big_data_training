@@ -1,0 +1,118 @@
+---
+title: "exercise_3"
+format: html
+editor: visual
+---
+# Ejercicio 3: Parallelization I
+
+### Using the method you prefer, repeat the previous example (coefficient bootstrapping), changing the number of cores, from 2 to the number in your system (parallel::detectCores()).
+
+*Are always the times better as we increase the number of cores?
+No, the plot shows a point where the higher number of cores does not necessarily correlate with a higher speed. The shortest times are observed with 8 cores, at 4-6 seconds. Runs between 10 to 16 cores are generally slower.
+
+The reason is because there is a point where the worload is not large enough and the costs can exceed the benefit of adding more cores.
+
+*Can your memory hold all examples?
+Yes, the process runs successfully for all the configurations.
+
+```{r}
+# libraries
+library(mirai)
+library(parallel)
+library(foreach)
+library(doParallel)
+library(dplyr)
+
+# data needed
+n_repetitions <- 1e4
+res_coefs <- list()
+iris_data <- iris |>
+  dplyr::filter(Species != "setosa")
+# set the number of cores to use
+doParallel::registerDoParallel(cores = 8)
+# foreach loop (for illustration purposes, we check the time used)
+eight_cores <- system.time(
+  {res_coefs <- foreach::foreach(index = 1:n_repetitions) %dopar% {
+    sample_individuals <- sample(85, 85, replace = TRUE)
+    model_res <- glm(
+      iris_data[sample_individuals, "Species"] ~ iris_data[sample_individuals, "Petal.Length"],
+      family = binomial
+    )
+    coefficients(model_res)
+  }}
+)
+
+test_efficiency <- rbind(four_cores, six_cores, eight_cores)
+
+# Mclapply
+
+# Data
+iris_data <- iris |>
+  filter(Species != "setosa") |>
+  mutate(Species = droplevels(Species))
+
+# Function to process one repetition
+coef_function <- function(repetition) {
+  
+  sample_individuals <- sample(
+    seq_len(nrow(iris_data)),
+    nrow(iris_data),
+    replace = TRUE
+  )
+  
+  boot_data <- iris_data[sample_individuals, ]
+  
+  model_res <- suppressWarnings(
+    glm(
+      Species ~ Petal.Length,
+      data = boot_data,
+      family = binomial
+    )
+  )
+  
+  coefficients(model_res)
+}
+
+# Number of repetitions
+n_repetitions <- 1e4
+
+# Function to run parallel processing with a given number of cores
+run_parallel <- function(n_cores) {
+  
+  cl <- makeCluster(n_cores)
+  on.exit(stopCluster(cl), add = TRUE)
+  
+  clusterExport(
+    cl,
+    varlist = c("iris_data", "coef_function"),
+    envir = environment()
+  )
+  
+  clusterSetRNGStream(cl, iseed = 123)
+  
+  parLapply(
+    cl,
+    X = seq_len(n_repetitions),
+    fun = coef_function
+  )
+}
+
+# Benchmark
+cores_benchmark <- bench::mark(
+  core_02 = run_parallel(2),
+  core_04 = run_parallel(4),
+  core_06 = run_parallel(6),
+  core_08 = run_parallel(8),
+  core_10 = run_parallel(10),
+  core_12 = run_parallel(12),
+  core_14 = run_parallel(14),
+  core_16 = run_parallel(16),
+  iterations = 3,
+  check = FALSE,
+  memory = FALSE
+)
+
+plot(cores_benchmark)
+
+```
+---

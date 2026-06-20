@@ -1,0 +1,185 @@
+---
+title: "exercise_1_bigger_than_memory"
+format: html
+editor: visual
+---
+
+# Ejercicio 1. Benchmarking
+
+### Compare (benchmark) reading and processing the especified data with:
+
+-   duckdb (reading the file remotely)
+
+-   duckdb (reading the file locally. Include the download time in the benchmark)
+
+-   arrow (reading the file locally. Include the download time in the benchmark)
+
+```{r}
+
+# Instalar multiples librerias (Si no lo estan)
+check.packages <- function(pkg){
+  new.pkg <- pkg[!(pkg %in% installed.packages()[, "Package"])]
+  if (length(new.pkg)) 
+    install.packages(new.pkg, dependencies = TRUE)
+  sapply(pkg, require, character.only = TRUE)
+}
+packages<-c("openxlsx","sf","glue", "dplyr", "plyr","data.table","stringr",
+            "xts","ggpubr","rstudioapi", "lubridate","DescTools","matrixStats",
+            "splitstackshape", "mgsub", "textshape", "psych","fuzzyjoin", "irr", 
+            "bench", "DBI", "duckdb", "arrow", "geoarrow")
+check.packages(packages)
+
+
+### IMPORTAR LIBRERIAS ###
+library(openxlsx)
+library(tidyr)
+library(zoo)
+library(dplyr)
+library(data.table)
+library(xts)
+library(ggpubr)
+library(purrr)
+library(rstudioapi)
+library(lubridate)
+library(DescTools)
+library(matrixStats)
+library(stringr)
+library(splitstackshape)
+library(purrr)
+library(mgsub)
+library(irr)
+library(janitor)
+library(reshape2)
+library(tibble)
+library(ggplot2)
+library(patchwork)
+library(glue)
+library(sf)
+library(bench)
+library(DBI)
+library(duckdb)
+library(arrow)
+library(geoarrow)
+
+
+# Select directory path
+current_folder<-dirname(rstudioapi::getActiveDocumentContext()$path)
+setwd(current_folder)
+
+data_folder <- file.path(current_folder, "..", "DATA")
+
+#### 1) duckdb (reading the file remotely)
+
+# Create a connection to SQL
+db_conn <- dbConnect(duckdb())
+
+# Initialize connection (necesario instalar "httpfs" si se quiere leer desde la página web)
+dbExecute(db_conn, "INSTALL httpfs;")
+dbExecute(db_conn, "LOAD httpfs;")
+
+
+# Create query parquet file (remotely)
+parquet_prep <- glue(
+  "SELECT *
+  FROM read_parquet('https://data-emf.creaf.cat/public/parquet/stations_data_historical/meteo_stations_2000_2024.parquet')
+")
+
+# Read parquet file remotely
+
+remote_parquet_test <- bench::mark(dbGetQuery(db_conn, parquet_prep) %>%
+                                     select(day,
+                                            year,
+                                            month,
+                                            station_province,
+                                            starts_with("Temperature"),
+                                            ends_with("Humidity"),
+                                            Precipitation,
+                                            geom) %>% 
+                                     filter(year == 2020) %>% 
+                                     st_as_sf(crs = 25830)
+)
+
+
+### 2) duckdb (reading the file locally. Include the download time in the benchmark)
+
+# Create a connection to SQL
+db_conn <- dbConnect(duckdb())
+
+# Initialize connection (necesario instalar "httpfs" si se quiere leer desde la página web)
+dbExecute(db_conn, "INSTALL spatial;")
+dbExecute(db_conn, "LOAD spatial;")
+
+# SQL data file directory
+data_file <- file.path(
+  current_folder,
+  "..",
+  "DATA",
+  "meteo_stations_2000_2024.parquet"
+)
+
+
+data_file <- normalizePath(
+  data_file,
+  winslash = "/",
+  mustWork = TRUE
+)
+
+# Create query parquet file (remotely)
+locally_data <- glue(
+  "SELECT *
+  FROM read_parquet('{data_file}')"
+  )
+
+locally_parquet <- bench::mark(
+  DBI::dbGetQuery(db_conn, locally_data) %>% 
+    select(day,
+           year,
+           month,
+           station_province,
+           starts_with("Temperature"),
+           ends_with("Humidity"),
+           Precipitation,
+           geom) %>%
+    filter( year == 2020) %>% 
+    st_as_sf(crs = 25830)
+)
+
+### 3) arrow (reading the file locally. Include the download time in the benchmark)
+data_parquet <- open_dataset(paste0(data_folder, "/", "meteo_stations_2000_2024.parquet"))
+
+only_parquet <- bench::mark(data_parquet %>% 
+                              select(day,
+                                     year,
+                                     month,
+                                     station_province,
+                                     starts_with("Temperature"),
+                                     ends_with("Humidity"),
+                                     Precipitation,
+                                     geom) %>%
+                              filter(year == 2020) %>% 
+                              sf::st_as_sf(crs = 25830)
+)
+
+# 4) sf with parquet (reading the file locally)
+data_parquet <- open_dataset(paste0(data_folder, "/", "meteo_stations_2000_2024.parquet"))
+
+data_sf_parquet <- bench::mark(data_parquet %>% 
+                                 select(day, year, month, station_province,
+                                        dplyr::starts_with("Temperature"),
+                                        dplyr::ends_with("Humidity"),
+                                        Precipitation,
+                                        geom) %>%
+                                 filter(year == 2020) %>% 
+                                 st_as_sf(crs = 25830)
+)
+
+# Benchmark results
+benchmark_results <- bind_rows(remote_parquet_test, locally_parquet, only_parquet, data_sf_parquet) %>%
+  select(min, median, `itr/sec`,`mem_alloc`, `gc/sec`, n_itr, n_gc, total_time)
+
+print(benchmark_results)
+
+
+```
+
+El método que ha presentado mayor velocidad a la hora de cargar el archivo de datos temporales ha sido la combinación de arrow local para abrir el archivo parquet de forma manual junto con sf. La media de tiempo reporta unos 2.25 segundos para cargar y procesar los datos.
